@@ -449,12 +449,7 @@ class EnhancedIPTVManager:
         if not self.url_history:
             self._print_warning("No URL history available!")
             return
-        
-        groups = self.current_playlist.group_by_attribute()
-        
-        # Sort groups by channel count
-        sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
-        
+                
         if RICH_AVAILABLE:
             history_table = Table(title="URL History", box=box.ROUNDED)
             history_table.add_column("#", style="white", width=4)
@@ -927,16 +922,6 @@ class EnhancedIPTVManager:
         case_sensitive = input(f"{Fore.CYAN}Case sensitive? (y/n, default=n): {Style.RESET_ALL}").strip().lower() == 'y'
         
         self.search_channels(pattern, case_sensitive=case_sensitive)
-    
-    def _export_interactive(self):
-        """Interactive export."""
-        format_type = input(f"{Fore.CYAN}Export format (json/m3u/m3u8, default=json): {Style.RESET_ALL}").strip().lower()
-        if not format_type:
-            format_type = "json"
-        
-        self.export_playlist(format_type)
-    
-    # ... [Previous display methods would be included here] ...
     
     def _display_enhanced_rich_menu(self):
         """Display enhanced rich interactive menu."""
