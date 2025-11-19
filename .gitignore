@@ -8,3 +8,4 @@ dist/
 **/.mypy_cache/
 pkgdata.txt
 out/
+iptv_data/url_history.json
