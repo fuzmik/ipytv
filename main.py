@@ -69,6 +69,235 @@ class EnhancedIPTVManager:
         self.data_dir.mkdir(exist_ok=True)
         self.url_history = self._load_url_history()
         self.saved_playlists = self._load_saved_playlists()
+    def display_playlist_overview(self):
+        """Display comprehensive playlist overview."""
+        if not self.current_playlist:
+            self._print_warning("No playlist loaded!")
+            return
+        
+        pl = self.current_playlist
+        total_channels = pl.length()
+        
+        if RICH_AVAILABLE:
+            # Create overview panel
+            overview_table = Table(title="Playlist Overview", box=box.ROUNDED)
+            overview_table.add_column("Metric", style="cyan")
+            overview_table.add_column("Value", style="white")
+            
+            overview_table.add_row("Total Channels", f"{total_channels:,}")
+            
+            # Group analysis
+            groups = pl.group_by_attribute()
+            overview_table.add_row("Unique Groups", f"{len(groups):,}")
+            
+            # URL analysis
+            url_groups = pl.group_by_url()
+            overview_table.add_row("Unique URLs", f"{len(url_groups):,}")
+            
+            # Series detection
+            series_map, non_series = extract_series(pl)
+            overview_table.add_row("Detected Series", f"{len(series_map):,}")
+            
+            # Attributes
+            playlist_attrs = pl.get_attributes()
+            overview_table.add_row("Playlist Attributes", f"{len(playlist_attrs):,}")
+            
+            self.console.print(Panel(overview_table, title="📊 Overview", title_align="left"))
+            
+        else:
+            print(f"{Fore.CYAN}{Style.BRIGHT}📊 Playlist Overview:{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}Total Channels: {Fore.YELLOW}{total_channels:,}{Style.RESET_ALL}")
+            
+            groups = pl.group_by_attribute()
+            print(f"{Fore.WHITE}Unique Groups: {Fore.YELLOW}{len(groups):,}{Style.RESET_ALL}")
+            
+            url_groups = pl.group_by_url()
+            print(f"{Fore.WHITE}Unique URLs: {Fore.YELLOW}{len(url_groups):,}{Style.RESET_ALL}")
+            
+            series_map, non_series = extract_series(pl)
+            print(f"{Fore.WHITE}Detected Series: {Fore.YELLOW}{len(series_map):,}{Style.RESET_ALL}")
+            
+            playlist_attrs = pl.get_attributes()
+            print(f"{Fore.WHITE}Playlist Attributes: {Fore.YELLOW}{len(playlist_attrs):,}{Style.RESET_ALL}")
+            print()
+
+    def display_group_analysis(self, top_n: int = 10):
+        """Display group analysis with top groups."""
+        if not self.current_playlist:
+            return
+        
+        groups = self.current_playlist.group_by_attribute()
+        
+        # Sort groups by channel count
+        sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
+        
+        if RICH_AVAILABLE:
+            group_table = Table(title=f"Top {top_n} Groups", box=box.ROUNDED)
+            group_table.add_column("Rank", style="white")
+            group_table.add_column("Group Name", style="cyan")
+            group_table.add_column("Channel Count", style="green", justify="right")
+            group_table.add_column("Percentage", style="yellow", justify="right")
+            
+            total_channels = self.current_playlist.length()
+            
+            for i, (group_name, channel_indices) in enumerate(sorted_groups[:top_n]):
+                count = len(channel_indices)
+                percentage = (count / total_channels) * 100
+                
+                # Handle no-group case
+                display_name = group_name if group_name != self.current_playlist.NO_GROUP_KEY else "[No Group]"
+                
+                group_table.add_row(
+                    str(i + 1),
+                    display_name,
+                    f"{count:,}",
+                    f"{percentage:.1f}%"
+                )
+            
+            self.console.print(Panel(group_table, title="📁 Group Analysis", title_align="left"))
+            
+        else:
+            print(f"{Fore.CYAN}{Style.BRIGHT}📁 Top {top_n} Groups:{Style.RESET_ALL}")
+            total_channels = self.current_playlist.length()
+            
+            for i, (group_name, channel_indices) in enumerate(sorted_groups[:top_n]):
+                count = len(channel_indices)
+                percentage = (count / total_channels) * 100
+                
+                display_name = group_name if group_name != self.current_playlist.NO_GROUP_KEY else "[No Group]"
+                
+                print(f"{Fore.WHITE}{i+1:2d}. {Fore.CYAN}{display_name:<30} {Fore.GREEN}{count:>6,} {Fore.YELLOW}{percentage:>5.1f}%{Style.RESET_ALL}")
+            print()
+
+    def display_series_analysis(self):
+        """Display series/episode analysis."""
+        if not self.current_playlist:
+            return
+        
+        series_map, non_series = extract_series(self.current_playlist, exclude_single=True)
+        
+        if RICH_AVAILABLE:
+            if series_map:
+                series_table = Table(title="Detected TV Series", box=box.ROUNDED)
+                series_table.add_column("Series Name", style="cyan")
+                series_table.add_column("Episodes", style="green", justify="right")
+                series_table.add_column("Sample Episode", style="white")
+                
+                for series_name, series_playlist in list(series_map.items())[:15]:
+                    episode_count = series_playlist.length()
+                    sample_channel = series_playlist.get_channel(0) if episode_count > 0 else None
+                    sample_name = sample_channel.name if sample_channel else "N/A"
+                    
+                    series_table.add_row(
+                        series_name,
+                        f"{episode_count:,}",
+                        sample_name[:50] + "..." if len(sample_name) > 50 else sample_name
+                    )
+                
+                self.console.print(Panel(series_table, title="🎭 Series Detection", title_align="left"))
+            else:
+                self.console.print(Panel("No series detected in this playlist", 
+                                       title="🎭 Series Detection", title_align="left"))
+                
+        else:
+            print(f"{Fore.CYAN}{Style.BRIGHT}🎭 Series Detection:{Style.RESET_ALL}")
+            if series_map:
+                for series_name, series_playlist in list(series_map.items())[:10]:
+                    episode_count = series_playlist.length()
+                    print(f"{Fore.CYAN}📺 {series_name}: {Fore.GREEN}{episode_count} episodes{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}No series detected in this playlist{Style.RESET_ALL}")
+            print()
+
+    def search_channels(self, pattern: str, search_fields: List[str] = None, case_sensitive: bool = False):
+        """Search channels with pattern and display results."""
+        if not self.current_playlist:
+            self._print_warning("No playlist loaded!")
+            return
+        
+        if search_fields is None:
+            search_fields = ["name", "attributes.group-title"]
+        
+        results = self.current_playlist.search(pattern, search_fields, case_sensitive)
+        
+        if RICH_AVAILABLE:
+            if results:
+                search_table = Table(title=f"Search Results for '{pattern}'", box=box.ROUNDED)
+                search_table.add_column("#", style="white")
+                search_table.add_column("Channel Name", style="cyan")
+                search_table.add_column("Group", style="green")
+                search_table.add_column("URL", style="yellow")
+                
+                for i, channel in enumerate(results[:20]):
+                    group = channel.attributes.get('group-title', 'N/A')
+                    url_preview = channel.url[:50] + "..." if len(channel.url) > 50 else channel.url
+                    
+                    search_table.add_row(
+                        str(i + 1),
+                        channel.name,
+                        group,
+                        url_preview
+                    )
+                
+                self.console.print(Panel(search_table, title="🔍 Search Results", title_align="left"))
+                self.console.print(f"[dim]Found {len(results):,} matching channels[/dim]")
+            else:
+                self.console.print(Panel("No channels found matching your search criteria", 
+                                       title="🔍 Search Results", title_align="left"))
+                
+        else:
+            print(f"{Fore.CYAN}{Style.BRIGHT}🔍 Search Results for '{pattern}':{Style.RESET_ALL}")
+            if results:
+                for i, channel in enumerate(results[:15]):
+                    group = channel.attributes.get('group-title', 'N/A')
+                    print(f"{Fore.WHITE}{i+1:2d}. {Fore.CYAN}{channel.name} {Fore.GREEN}[{group}]{Style.RESET_ALL}")
+                print(f"{Fore.DIM}Found {len(results):,} matching channels{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}No channels found matching your search criteria{Style.RESET_ALL}")
+            print()
+
+    def export_playlist(self, format_type: str = "json"):
+        """Export playlist in different formats."""
+        if not self.current_playlist:
+            self._print_warning("No playlist loaded!")
+            return
+        
+        try:
+            if format_type.lower() == "json":
+                output = self.current_playlist.to_json_playlist()
+                filename = f"playlist_export_{int(time.time())}.json"
+            elif format_type.lower() == "m3u":
+                output = self.current_playlist.to_m3u_plus_playlist()
+                filename = f"playlist_export_{int(time.time())}.m3u"
+            elif format_type.lower() == "m3u8":
+                output = self.current_playlist.to_m3u8_playlist()
+                filename = f"playlist_export_{int(time.time())}.m3u8"
+            else:
+                self._print_error("Unsupported format. Use: json, m3u, or m3u8")
+                return
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(output)
+            
+            self._print_success(f"Playlist exported successfully to: {filename}")
+            
+        except Exception as e:
+            self._print_error(f"Export failed: {e}")
+
+    def _load_playlist_interactive(self):
+        """Interactive playlist loading."""
+        url = input(f"{Fore.CYAN}Enter playlist URL: {Style.RESET_ALL}").strip()
+        if not url:
+            self._print_warning("URL cannot be empty!")
+            return
+        
+        sanitize = input(f"{Fore.CYAN}Sanitize playlist? (y/n, default=y): {Style.RESET_ALL}").strip().lower()
+        sanitize = sanitize != 'n'
+        
+        self.load_playlist_from_url(url, sanitize)
+        
+        if self.current_playlist:
+            self._print_success(f"Successfully loaded playlist with {self.current_playlist.length():,} channels!")
         
     def _load_url_history(self) -> List[Dict[str, Any]]:
         """Load URL history from file."""
@@ -853,6 +1082,9 @@ def check_dependencies():
 def main():
     """Main entry point."""
     # Check dependencies
+    check_dependencies()  # Add this line
+    
+    # Create and run enhanced manager
     manager = EnhancedIPTVManager()
     
     # Check for command line arguments
