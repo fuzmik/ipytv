@@ -41,6 +41,7 @@ try:
     from rich import box
     from rich.markdown import Markdown
     from rich.syntax import Syntax
+    from rich.columns import Columns
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -69,6 +70,215 @@ class EnhancedIPTVManager:
         self.data_dir.mkdir(exist_ok=True)
         self.url_history = self._load_url_history()
         self.saved_playlists = self._load_saved_playlists()
+
+    def _load_url_history(self) -> List[Dict[str, Any]]:
+        """Load URL history from file."""
+        try:
+            if self.history_file.exists():
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            self._print_error(f"Failed to load URL history: {e}")
+        return []
+    
+    def _save_url_history(self):
+        """Save URL history to file."""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.url_history, f, indent=2)
+        except Exception as e:
+            self._print_error(f"Failed to save URL history: {e}")
+    
+    def _load_saved_playlists(self) -> Dict[str, Any]:
+        """Load saved playlists from file."""
+        try:
+            if self.playlists_file.exists():
+                with open(self.playlists_file, 'rb') as f:
+                    return pickle.load(f)
+        except Exception as e:
+            self._print_error(f"Failed to load saved playlists: {e}")
+        return {}
+    
+    def _save_saved_playlists(self):
+        """Save playlists to file."""
+        try:
+            with open(self.playlists_file, 'wb') as f:
+                pickle.dump(self.saved_playlists, f)
+        except Exception as e:
+            self._print_error(f"Failed to save playlists: {e}")
+    
+    def add_to_history(self, url: str, success: bool, channel_count: int = 0):
+        """Add URL to history."""
+        history_entry = {
+            'url': url,
+            'timestamp': time.time(),
+            'success': success,
+            'channel_count': channel_count,
+            'domain': urlparse(url).netloc
+        }
+        
+        # Remove existing entry if present
+        self.url_history = [entry for entry in self.url_history if entry['url'] != url]
+        
+        # Add new entry at beginning
+        self.url_history.insert(0, history_entry)
+        
+        # Keep only last 50 entries
+        self.url_history = self.url_history[:50]
+        
+        self._save_url_history()
+    
+    def load_playlist_from_url(self, url: str, sanitize: bool = True, playlist_name: str = None) -> bool:
+        """Load playlist from URL with progress indication."""
+        try:
+            if RICH_AVAILABLE:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    transient=True,
+                ) as progress:
+                    task = progress.add_task(f"Loading playlist from {url}", total=None)
+                    pl = playlist.loadu(url)
+                    progress.update(task, completed=1)
+            else:
+                print(f"{Fore.YELLOW}Loading playlist from: {url}{Style.RESET_ALL}")
+                pl = playlist.loadu(url)
+            
+            # Sanitize if requested
+            if sanitize and pl:
+                if RICH_AVAILABLE:
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        transient=True,
+                    ) as progress:
+                        task = progress.add_task("Sanitizing playlist...", total=None)
+                        pl = M3UPlaylistDoctor.sanitize(pl)
+                        progress.update(task, completed=1)
+                else:
+                    print(f"{Fore.YELLOW}Sanitizing playlist...{Style.RESET_ALL}")
+                    pl = M3UPlaylistDoctor.sanitize(pl)
+            
+            # Set as current playlist
+            self.current_playlist = pl
+            
+            # Generate name if not provided
+            if not playlist_name:
+                domain = urlparse(url).netloc
+                timestamp = time.strftime('%Y%m%d_%H%M%S')
+                playlist_name = f"{domain}_{timestamp}"
+            
+            # Store in loaded playlists
+            self.loaded_playlists[playlist_name] = pl
+            
+            # Add to history
+            self.add_to_history(url, True, pl.length() if pl else 0)
+            
+            return True
+            
+        except URLException as e:
+            self._print_error(f"Failed to load URL: {e}")
+            self.add_to_history(url, False)
+            return False
+        except MalformedPlaylistException as e:
+            self._print_error(f"Malformed playlist: {e}")
+            self.add_to_history(url, False)
+            return False
+        except Exception as e:
+            self._print_error(f"Unexpected error: {e}")
+            self.add_to_history(url, False)
+            return False
+    
+    def load_multiple_urls(self, urls: List[str], sanitize: bool = True):
+        """Load multiple playlists from URLs."""
+        success_count = 0
+        
+        if RICH_AVAILABLE:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Loading multiple playlists...", total=len(urls))
+                
+                for url in urls:
+                    progress.update(task, description=f"Loading {url[:50]}...")
+                    if self.load_playlist_from_url(url, sanitize):
+                        success_count += 1
+                    progress.update(task, advance=1)
+        else:
+            for i, url in enumerate(urls):
+                print(f"{Fore.CYAN}[{i+1}/{len(urls)}] Loading: {url}{Style.RESET_ALL}")
+                if self.load_playlist_from_url(url, sanitize):
+                    success_count += 1
+        
+        self._print_success(f"Successfully loaded {success_count}/{len(urls)} playlists")
+    
+    def load_from_history(self):
+        """Load playlist from history."""
+        if not self.url_history:
+            self._print_warning("No URL history available!")
+            return
+        
+        if RICH_AVAILABLE:
+            history_table = Table(title="URL History", box=box.ROUNDED)
+            history_table.add_column("#", style="white", width=4)
+            history_table.add_column("URL", style="cyan")
+            history_table.add_column("Channels", style="green", width=10)
+            history_table.add_column("Status", style="yellow", width=8)
+            history_table.add_column("Date", style="white", width=12)
+            
+            for i, entry in enumerate(self.url_history[:20]):
+                status = "✓" if entry['success'] else "✗"
+                status_color = "green" if entry['success'] else "red"
+                date = time.strftime('%m/%d %H:%M', time.localtime(entry['timestamp']))
+                url_preview = entry['url'][:60] + "..." if len(entry['url']) > 60 else entry['url']
+                
+                history_table.add_row(
+                    str(i + 1),
+                    url_preview,
+                    str(entry.get('channel_count', 0)),
+                    f"[{status_color}]{status}[/{status_color}]",
+                    date
+                )
+            
+            self.console.print(Panel(history_table, title="📜 URL History", title_align="left"))
+            
+            try:
+                choice = IntPrompt.ask(
+                    "Enter history number to load (0 to cancel)",
+                    choices=[str(i) for i in range(0, min(21, len(self.url_history) + 1))],
+                    default=0
+                )
+                
+                if choice > 0 and choice <= len(self.url_history):
+                    selected_url = self.url_history[choice - 1]['url']
+                    sanitize = Confirm.ask("Sanitize playlist?")
+                    self.load_playlist_from_url(selected_url, sanitize)
+                    
+            except Exception:
+                self._print_info("Selection cancelled")
+                
+        else:
+            print(f"{Fore.CYAN}{Style.BRIGHT}📜 URL History:{Style.RESET_ALL}")
+            for i, entry in enumerate(self.url_history[:10]):
+                status = "✓" if entry['success'] else "✗"
+                date = time.strftime('%m/%d %H:%M', time.localtime(entry['timestamp']))
+                print(f"{Fore.WHITE}{i+1:2d}. {Fore.CYAN}{entry['url']} {Fore.GREEN}[{entry.get('channel_count', 0)}] {Fore.YELLOW}[{status}] {Fore.WHITE}{date}{Style.RESET_ALL}")
+            
+            try:
+                choice = input(f"{Fore.CYAN}Enter history number to load (0 to cancel): {Style.RESET_ALL}").strip()
+                if choice.isdigit():
+                    choice_num = int(choice)
+                    if 0 < choice_num <= len(self.url_history):
+                        selected_url = self.url_history[choice_num - 1]['url']
+                        sanitize = input(f"{Fore.CYAN}Sanitize playlist? (y/n): {Style.RESET_ALL}").strip().lower() != 'n'
+                        self.load_playlist_from_url(selected_url, sanitize)
+            except Exception:
+                self._print_info("Selection cancelled")
+
     def display_playlist_overview(self):
         """Display comprehensive playlist overview."""
         if not self.current_playlist:
@@ -298,214 +508,6 @@ class EnhancedIPTVManager:
         
         if self.current_playlist:
             self._print_success(f"Successfully loaded playlist with {self.current_playlist.length():,} channels!")
-        
-    def _load_url_history(self) -> List[Dict[str, Any]]:
-        """Load URL history from file."""
-        try:
-            if self.history_file.exists():
-                with open(self.history_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            self._print_error(f"Failed to load URL history: {e}")
-        return []
-    
-    def _save_url_history(self):
-        """Save URL history to file."""
-        try:
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump(self.url_history, f, indent=2)
-        except Exception as e:
-            self._print_error(f"Failed to save URL history: {e}")
-    
-    def _load_saved_playlists(self) -> Dict[str, Any]:
-        """Load saved playlists from file."""
-        try:
-            if self.playlists_file.exists():
-                with open(self.playlists_file, 'rb') as f:
-                    return pickle.load(f)
-        except Exception as e:
-            self._print_error(f"Failed to load saved playlists: {e}")
-        return {}
-    
-    def _save_saved_playlists(self):
-        """Save playlists to file."""
-        try:
-            with open(self.playlists_file, 'wb') as f:
-                pickle.dump(self.saved_playlists, f)
-        except Exception as e:
-            self._print_error(f"Failed to save playlists: {e}")
-    
-    def add_to_history(self, url: str, success: bool, channel_count: int = 0):
-        """Add URL to history."""
-        history_entry = {
-            'url': url,
-            'timestamp': time.time(),
-            'success': success,
-            'channel_count': channel_count,
-            'domain': urlparse(url).netloc
-        }
-        
-        # Remove existing entry if present
-        self.url_history = [entry for entry in self.url_history if entry['url'] != url]
-        
-        # Add new entry at beginning
-        self.url_history.insert(0, history_entry)
-        
-        # Keep only last 50 entries
-        self.url_history = self.url_history[:50]
-        
-        self._save_url_history()
-    
-    def load_playlist_from_url(self, url: str, sanitize: bool = True, playlist_name: str = None) -> bool:
-        """Load playlist from URL with progress indication."""
-        try:
-            if RICH_AVAILABLE:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    transient=True,
-                ) as progress:
-                    task = progress.add_task(f"Loading playlist from {url}", total=None)
-                    pl = playlist.loadu(url)
-                    progress.update(task, completed=1)
-            else:
-                print(f"{Fore.YELLOW}Loading playlist from: {url}{Style.RESET_ALL}")
-                pl = playlist.loadu(url)
-            
-            # Sanitize if requested
-            if sanitize and pl:
-                if RICH_AVAILABLE:
-                    with Progress(
-                        SpinnerColumn(),
-                        TextColumn("[progress.description]{task.description}"),
-                        transient=True,
-                    ) as progress:
-                        task = progress.add_task("Sanitizing playlist...", total=None)
-                        pl = M3UPlaylistDoctor.sanitize(pl)
-                        progress.update(task, completed=1)
-                else:
-                    print(f"{Fore.YELLOW}Sanitizing playlist...{Style.RESET_ALL}")
-                    pl = M3UPlaylistDoctor.sanitize(pl)
-            
-            # Add to history
-            self.current_playlist = pl
-            
-            # Generate name if not provided
-            if not playlist_name:
-                domain = urlparse(url).netloc
-                timestamp = time.strftime('%Y%m%d_%H%M%S')
-                playlist_name = f"{domain}_{timestamp}"
-            
-            # Store in loaded playlists
-            self.loaded_playlists[playlist_name] = pl
-            
-            # Add to history
-            self.add_to_history(url, True, pl.length() if pl else 0)
-            
-            return True
-            
-        except URLException as e:
-            self._print_error(f"Failed to load URL: {e}")
-            self.add_to_history(url, False)
-            return False
-        except MalformedPlaylistException as e:
-            self._print_error(f"Malformed playlist: {e}")
-            self.add_to_history(url, False)
-            return False
-        except Exception as e:
-            self._print_error(f"Unexpected error: {e}")
-            self.add_to_history(url, False)
-            return False
-    
-    def load_multiple_urls(self, urls: List[str], sanitize: bool = True):
-        """Load multiple playlists from URLs."""
-        success_count = 0
-        
-        if RICH_AVAILABLE:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                transient=False,
-            ) as progress:
-                task = progress.add_task("Loading multiple playlists...", total=len(urls))
-                
-                for url in urls:
-                    progress.update(task, description=f"Loading {url[:50]}...")
-                    if self.load_playlist_from_url(url, sanitize):
-                        success_count += 1
-                    progress.update(task, advance=1)
-        else:
-            for i, url in enumerate(urls):
-                print(f"{Fore.CYAN}[{i+1}/{len(urls)}] Loading: {url}{Style.RESET_ALL}")
-                if self.load_playlist_from_url(url, sanitize):
-                    success_count += 1
-        
-        self._print_success(f"Successfully loaded {success_count}/{len(urls)} playlists")
-    
-    def load_from_history(self):
-        """Load playlist from history."""
-        if not self.url_history:
-            self._print_warning("No URL history available!")
-            return
-                
-        if RICH_AVAILABLE:
-            history_table = Table(title="URL History", box=box.ROUNDED)
-            history_table.add_column("#", style="white", width=4)
-            history_table.add_column("URL", style="cyan")
-            history_table.add_column("Channels", style="green", width=10)
-            history_table.add_column("Status", style="yellow", width=8)
-            history_table.add_column("Date", style="white", width=12)
-            
-            for i, entry in enumerate(self.url_history[:20]):
-                status = "✓" if entry['success'] else "✗"
-                status_color = "green" if entry['success'] else "red"
-                date = time.strftime('%m/%d %H:%M', time.localtime(entry['timestamp']))
-                url_preview = entry['url'][:60] + "..." if len(entry['url']) > 60 else entry['url']
-                
-                history_table.add_row(
-                    str(i + 1),
-                    url_preview,
-                    str(entry.get('channel_count', 0)),
-                    f"[{status_color}]{status}[/{status_color}]",
-                    date
-                )
-            
-            self.console.print(Panel(history_table, title="📜 URL History", title_align="left"))
-            
-            try:
-                choice = IntPrompt.ask(
-                    "Enter history number to load (0 to cancel)",
-                    choices=[str(i) for i in range(0, min(21, len(self.url_history) + 1))],
-                    default=0
-                )
-                
-                if choice > 0 and choice <= len(self.url_history):
-                    selected_url = self.url_history[choice - 1]['url']
-                    sanitize = Confirm.ask("Sanitize playlist?")
-                    self.load_playlist_from_url(selected_url, sanitize)
-                    
-            except Exception:
-                self._print_info("Selection cancelled")
-                
-        else:
-            print(f"{Fore.CYAN}{Style.BRIGHT}📜 URL History:{Style.RESET_ALL}")
-            for i, entry in enumerate(self.url_history[:10]):
-                status = "✓" if entry['success'] else "✗"
-                date = time.strftime('%m/%d %H:%M', time.localtime(entry['timestamp']))
-                print(f"{Fore.WHITE}{i+1:2d}. {Fore.CYAN}{entry['url']} {Fore.GREEN}[{entry.get('channel_count', 0)}] {Fore.YELLOW}[{status}] {Fore.WHITE}{date}{Style.RESET_ALL}")
-            
-            try:
-                choice = input(f"{Fore.CYAN}Enter history number to load (0 to cancel): {Style.RESET_ALL}").strip()
-                if choice.isdigit():
-                    choice_num = int(choice)
-                    if 0 < choice_num <= len(self.url_history):
-                        selected_url = self.url_history[choice_num - 1]['url']
-                        sanitize = input(f"{Fore.CYAN}Sanitize playlist? (y/n): {Style.RESET_ALL}").strip().lower() != 'n'
-                        self.load_playlist_from_url(selected_url, sanitize)
-            except Exception:
-                self._print_info("Selection cancelled")
     
     def parse_tvg_tags_analysis(self):
         """Analyze and display TVG tag usage across playlist."""
@@ -568,18 +570,63 @@ class EnhancedIPTVManager:
                 print(f"{Fore.YELLOW}No TVG tags found in playlist{Style.RESET_ALL}")
             print()
     
-    def export_with_group_filter(self, groups: List[str] = None, exclude: bool = False):
-        """Export playlist with group filtering."""
+    def export_with_group_filter(self):
+        """Enhanced export with interactive group filtering."""
         if not self.current_playlist:
             self._print_warning("No playlist loaded!")
             return
         
-        if not groups:
-            # Show group selection interface
-            groups = self._select_groups_interactive()
-            if not groups:
-                self._print_info("Export cancelled")
-                return
+        # Get all groups
+        groups = self.current_playlist.group_by_attribute()
+        group_names = sorted([name for name in groups.keys() if name != self.current_playlist.NO_GROUP_KEY])
+        
+        if not group_names:
+            self._print_warning("No groups found in playlist!")
+            return
+        
+        if RICH_AVAILABLE:
+            # Enhanced group selection with multi-column layout
+            selected_groups = self._enhanced_group_selection(group_names, groups)
+        else:
+            selected_groups = self._simple_group_selection(group_names, groups)
+        
+        if not selected_groups:
+            self._print_info("Export cancelled")
+            return
+        
+        # Export options
+        if RICH_AVAILABLE:
+            export_panel = Panel(
+                f"[cyan]Selected Groups:[/cyan] {len(selected_groups)}\n"
+                f"[green]Total Channels:[/green] {self.current_playlist.length():,}\n"
+                f"[yellow]Filtered Channels:[/yellow] {sum(len(groups[group]) for group in selected_groups):,}",
+                title="📦 Export Summary",
+                border_style="green"
+            )
+            self.console.print(export_panel)
+            
+            format_choice = Prompt.ask(
+                "Export format",
+                choices=["json", "m3u", "m3u8"],
+                default="m3u"
+            )
+            
+            exclude = Confirm.ask("Exclude selected groups instead of including?", default=False)
+            
+            filename_prompt = Prompt.ask(
+                "Filename (leave empty for auto-generated)",
+                default=""
+            )
+        else:
+            print(f"{Fore.GREEN}📦 Export Summary:{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Selected Groups: {Fore.WHITE}{len(selected_groups)}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}Total Channels: {Fore.WHITE}{self.current_playlist.length():,}{Style.RESET_ALL}")
+            filtered_count = sum(len(groups[group]) for group in selected_groups)
+            print(f"{Fore.YELLOW}Filtered Channels: {Fore.WHITE}{filtered_count:,}{Style.RESET_ALL}")
+            
+            format_choice = input(f"{Fore.CYAN}Export format (json/m3u/m3u8, default=m3u): {Style.RESET_ALL}").strip().lower() or "m3u"
+            exclude = input(f"{Fore.CYAN}Exclude selected groups? (y/n, default=n): {Style.RESET_ALL}").strip().lower() == 'y'
+            filename_prompt = input(f"{Fore.CYAN}Filename (enter for auto): {Style.RESET_ALL}").strip()
         
         # Create filtered playlist
         filtered_pl = M3UPlaylist()
@@ -588,27 +635,22 @@ class EnhancedIPTVManager:
         channels_exported = 0
         for channel in self.current_playlist:
             channel_group = channel.attributes.get('group-title', '')
-            should_include = (channel_group in groups) if not exclude else (channel_group not in groups)
+            should_include = (channel_group in selected_groups) if not exclude else (channel_group not in selected_groups)
             
             if should_include:
                 filtered_pl.append_channel(channel)
                 channels_exported += 1
         
-        
-        if RICH_AVAILABLE:
-            format_choice = Prompt.ask(
-                "Export format",
-                choices=["json", "m3u", "m3u8"],
-                default="json"
-            )
-        else:
-            format_choice = input(f"{Fore.CYAN}Export format (json/m3u/m3u8, default=json): {Style.RESET_ALL}").strip().lower() or "json"
-        
         # Generate filename
-        group_desc = "excluded" if exclude else "selected"
-        groups_str = "_".join(groups[:3])[:30]  # Limit filename length
-        timestamp = int(time.time())
-        filename = f"playlist_{groups_str}_{group_desc}_{timestamp}.{format_choice}"
+        if filename_prompt:
+            filename = filename_prompt
+            if not filename.endswith(f".{format_choice}"):
+                filename += f".{format_choice}"
+        else:
+            group_desc = "excluded" if exclude else "selected"
+            groups_str = "_".join([g[:15] for g in selected_groups[:2]])  # Limit filename length
+            timestamp = int(time.time())
+            filename = f"iptv_{groups_str}_{group_desc}_{timestamp}.{format_choice}"
         
         try:
             if format_choice == "json":
@@ -624,75 +666,166 @@ class EnhancedIPTVManager:
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(output)
             
-            self._print_success(f"Exported {channels_exported} channels to: {filename}")
+            self._print_success(f"✅ Exported {channels_exported} channels to: {filename}")
             
         except Exception as e:
             self._print_error(f"Export failed: {e}")
     
-    def _select_groups_interactive(self) -> List[str]:
-        """Interactive group selection."""
-        if not self.current_playlist:
-            return []
+    def _enhanced_group_selection(self, group_names: List[str], groups: Dict[str, List[int]]) -> List[str]:
+        """Enhanced group selection with rich interface."""
+        selected_groups = set()
         
-        groups = self.current_playlist.group_by_attribute()
-        group_names = sorted([name for name in groups.keys() if name != self.current_playlist.NO_GROUP_KEY])
-        
-        if not group_names:
-            self._print_warning("No groups found in playlist!")
-            return []
-        
-        if RICH_AVAILABLE:
-            group_table = Table(title="Available Groups", box=box.ROUNDED)
-            group_table.add_column("#", style="white", width=4)
-            group_table.add_column("Group Name", style="cyan")
-            group_table.add_column("Channel Count", style="green", width=12)
+        while True:
+            # Create multi-column layout for groups
+            group_tables = []
+            items_per_column = 15
+            total_columns = (len(group_names) + items_per_column - 1) // items_per_column
             
-            for i, group_name in enumerate(group_names[:25]):  # Show first 25 groups
-                count = len(groups[group_name])
-                group_table.add_row(str(i + 1), group_name, f"{count:,}")
-            
-            self.console.print(Panel(group_table, title="📁 Group Selection", title_align="left"))
-            
-            try:
-                choices = Prompt.ask(
-                    "Enter group numbers (comma-separated, 'all' for all groups)",
-                    default="all"
+            for col_idx in range(total_columns):
+                start_idx = col_idx * items_per_column
+                end_idx = min(start_idx + items_per_column, len(group_names))
+                
+                column_table = Table(
+                    title=f"Groups {start_idx+1}-{end_idx}",
+                    box=box.SIMPLE,
+                    show_header=True,
+                    header_style="bold magenta"
                 )
+                column_table.add_column("#", style="white", width=4)
+                column_table.add_column("Select", style="cyan", width=8)
+                column_table.add_column("Group Name", style="green")
+                column_table.add_column("Channels", style="yellow", justify="right", width=10)
                 
-                if choices.lower() == 'all':
-                    return group_names
-                else:
-                    selected_indices = []
-                    for choice in choices.split(','):
-                        if choice.strip().isdigit():
-                            idx = int(choice.strip()) - 1
-                            if 0 <= idx < len(group_names):
-                                selected_indices.append(idx)
+                for i in range(start_idx, end_idx):
+                    group_name = group_names[i]
+                    count = len(groups[group_name])
+                    is_selected = "✓" if group_name in selected_groups else " "
+                    selection_status = "[green]✓[/green]" if group_name in selected_groups else "[dim] [/dim]"
                     
-                    selected_groups = [group_names[i] for i in selected_indices]
-                    return selected_groups
-                    
-            except Exception:
-                return []
+                    column_table.add_row(
+                        str(i + 1),
+                        selection_status,
+                        group_name,
+                        f"{count:,}"
+                    )
                 
-        else:
-            print(f"{Fore.CYAN}{Style.BRIGHT}📁 Available Groups:{Style.RESET_ALL}")
-            for i, group_name in enumerate(group_names[:15]):
-                count = len(groups[group_name])
-                print(f"{Fore.WHITE}{i+1:2d}. {Fore.CYAN}{group_name:<30} {Fore.GREEN}{count:>6,}{Style.RESET_ALL}")
+                group_tables.append(column_table)
             
-            choices = input(f"{Fore.CYAN}Enter group numbers (comma-separated, 'all' for all): {Style.RESET_ALL}").strip()
+            # Display groups in columns
+            self.console.print(Panel(Columns(group_tables), title="📋 Available Groups - Multi-Select", title_align="left"))
             
-            if choices.lower() == 'all':
-                return group_names
+            # Selection options
+            self.console.print("\n[bold cyan]Selection Options:[/bold cyan]")
+            self.console.print("[white]• Enter group numbers (e.g., 1,3,5-10,15)[/white]")
+            self.console.print("[white]• 'all' - Select all groups[/white]")
+            self.console.print("[white]• 'none' - Clear selection[/white]")
+            self.console.print("[white]• 'done' - Finish selection[/white]")
+            self.console.print(f"[green]Currently selected: {len(selected_groups)} groups[/green]\n")
+            
+            choice = Prompt.ask(
+                "Enter your selection",
+                default="done"
+            ).strip().lower()
+            
+            if choice == 'done':
+                break
+            elif choice == 'all':
+                selected_groups = set(group_names)
+                self._print_success(f"Selected all {len(group_names)} groups")
+            elif choice == 'none':
+                selected_groups.clear()
+                self._print_info("Selection cleared")
             else:
-                selected_groups = []
-                for choice in choices.split(','):
-                    if choice.strip().isdigit():
-                        idx = int(choice.strip()) - 1
-                        if 0 <= idx < len(group_names):
-                            selected_groups.append(group_names[idx])
-                return selected_groups
+                # Parse number ranges (e.g., "1,3,5-10,15")
+                new_selections = set()
+                try:
+                    for part in choice.split(','):
+                        part = part.strip()
+                        if '-' in part:
+                            start, end = part.split('-')
+                            start_idx = int(start.strip()) - 1
+                            end_idx = int(end.strip()) - 1
+                            for idx in range(start_idx, end_idx + 1):
+                                if 0 <= idx < len(group_names):
+                                    new_selections.add(group_names[idx])
+                        else:
+                            idx = int(part.strip()) - 1
+                            if 0 <= idx < len(group_names):
+                                new_selections.add(group_names[idx])
+                    
+                    # Toggle selection for specified groups
+                    for group in new_selections:
+                        if group in selected_groups:
+                            selected_groups.remove(group)
+                        else:
+                            selected_groups.add(group)
+                    
+                    self._print_success(f"Updated selection: {len(selected_groups)} groups selected")
+                    
+                except ValueError:
+                    self._print_error("Invalid input. Please enter numbers or ranges.")
+        
+        return list(selected_groups)
+    
+    def _simple_group_selection(self, group_names: List[str], groups: Dict[str, List[int]]) -> List[str]:
+        """Simple group selection for non-rich interface."""
+        selected_groups = []
+        
+        while True:
+            print(f"\n{Fore.CYAN}{Style.BRIGHT}📋 Available Groups:{Style.RESET_ALL}")
+            for i, group_name in enumerate(group_names):
+                count = len(groups[group_name])
+                selected = "✓" if group_name in selected_groups else " "
+                print(f"{Fore.WHITE}{i+1:3d}. [{selected}] {Fore.CYAN}{group_name:<35} {Fore.GREEN}{count:>5,}{Style.RESET_ALL}")
+            
+            print(f"\n{Fore.YELLOW}Selection Options:{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}• Enter group numbers (e.g., 1,3,5 or 1-5,10){Style.RESET_ALL}")
+            print(f"{Fore.WHITE}• 'all' - Select all groups{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}• 'none' - Clear selection{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}• 'done' - Finish selection{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}Currently selected: {len(selected_groups)} groups{Style.RESET_ALL}")
+            
+            choice = input(f"\n{Fore.CYAN}Enter your selection: {Style.RESET_ALL}").strip().lower()
+            
+            if choice == 'done':
+                break
+            elif choice == 'all':
+                selected_groups = group_names.copy()
+                print(f"{Fore.GREEN}Selected all {len(group_names)} groups{Style.RESET_ALL}")
+            elif choice == 'none':
+                selected_groups.clear()
+                print(f"{Fore.BLUE}Selection cleared{Style.RESET_ALL}")
+            else:
+                # Parse number ranges
+                new_selections = set()
+                try:
+                    for part in choice.split(','):
+                        part = part.strip()
+                        if '-' in part:
+                            start, end = part.split('-')
+                            start_idx = int(start.strip()) - 1
+                            end_idx = int(end.strip()) - 1
+                            for idx in range(start_idx, end_idx + 1):
+                                if 0 <= idx < len(group_names):
+                                    new_selections.add(group_names[idx])
+                        else:
+                            idx = int(part.strip()) - 1
+                            if 0 <= idx < len(group_names):
+                                new_selections.add(group_names[idx])
+                    
+                    # Toggle selection
+                    for group in new_selections:
+                        if group in selected_groups:
+                            selected_groups.remove(group)
+                        else:
+                            selected_groups.append(group)
+                    
+                    print(f"{Fore.GREEN}Updated selection: {len(selected_groups)} groups selected{Style.RESET_ALL}")
+                    
+                except ValueError:
+                    print(f"{Fore.RED}Invalid input. Please enter numbers or ranges.{Style.RESET_ALL}")
+        
+        return selected_groups
     
     def manage_loaded_playlists(self):
         """Manage multiple loaded playlists."""
@@ -925,129 +1058,219 @@ class EnhancedIPTVManager:
     
     def _display_enhanced_rich_menu(self):
         """Display enhanced rich interactive menu."""
-        menu_table = Table(show_header=False, box=box.ROUNDED)
-        menu_table.add_column("Option", style="cyan", width=4)
+        # Create a beautiful header
+        header_text = Text("🎬 ENHANCED IPTV PLAYLIST MANAGER", style="bold bright_magenta")
+        header = Panel(header_text, style="bright_cyan", box=box.DOUBLE)
+        self.console.print(header)
+        
+        # Current status panel
+        status_info = []
+        if self.current_playlist:
+            status_info.append(f"[bold green]✓ Current Playlist:[/bold green] {self.current_playlist.length():,} channels")
+        else:
+            status_info.append("[yellow]⚠ No playlist loaded[/yellow]")
+        
+        if self.loaded_playlists:
+            status_info.append(f"[bold blue]📚 Loaded:[/bold blue] {len(self.loaded_playlists)} playlists")
+        
+        if self.url_history:
+            success_count = sum(1 for entry in self.url_history if entry.get('success', False))
+            status_info.append(f"[bold cyan]📜 History:[/bold cyan] {success_count}/{len(self.url_history)} successful")
+        
+        if status_info:
+            status_panel = Panel("\n".join(status_info), title="📊 Current Status", border_style="green")
+            self.console.print(status_panel)
+        
+        # Main menu
+        menu_table = Table(show_header=False, box=box.ROUNDED, padding=(0, 2))
+        menu_table.add_column("Option", style="bold cyan", width=6)
         menu_table.add_column("Description", style="white")
+        menu_table.add_column("Status", style="dim", width=12)
         
         menu_items = [
-            ("1", "📥 Load Single Playlist"),
-            ("2", "📜 Load from History"),
-            ("3", "📚 Load Multiple Playlists"),
-            ("4", "📊 Playlist Overview"),
-            ("5", "📁 Group Analysis"),
-            ("6", "🏷️ TVG Tag Analysis"),
-            ("7", "💾 Export with Group Filter"),
-            ("8", "🔀 Manage Playlists"),
-            ("9", "🔄 Merge Playlists"),
-            ("10", "🎭 Series Detection"),
-            ("11", "🔍 Search Channels"),
-            ("12", "❓ Help"),
-            ("q", "🚪 Quit")
+            ("1", "📥 Load Single Playlist", "Always"),
+            ("2", "📜 Load from History", f"{len(self.url_history)} saved"),
+            ("3", "📚 Load Multiple URLs", "Batch mode"),
+            ("4", "📊 Playlist Overview", "Current only"),
+            ("5", "📁 Group Analysis", "Top 10 groups"),
+            ("6", "🏷️ TVG Tag Analysis", "Tag stats"),
+            ("7", "💾 Smart Export", "Group filter"),
+            ("8", "🔀 Manage Playlists", f"{len(self.loaded_playlists)} loaded"),
+            ("9", "🔄 Merge Playlists", f"{len(self.loaded_playlists)} available"),
+            ("10", "🎭 Series Detection", "Auto-detect"),
+            ("11", "🔍 Search Channels", "Regex support"),
+            ("12", "❓ Help & Guide", "Documentation"),
+            ("q", "🚪 Exit Manager", "Safe exit")
         ]
         
-        for key, desc in menu_items:
-            menu_table.add_row(f"[bold]{key}[/bold]", desc)
+        for key, desc, status in menu_items:
+            # Color code based on availability
+            if key in ['4','5','6','7','10','11'] and not self.current_playlist:
+                status_style = "red"
+            elif key == '9' and len(self.loaded_playlists) < 2:
+                status_style = "red"
+            else:
+                status_style = "dim"
+            
+            menu_table.add_row(
+                f"[bold cyan]{key}[/bold cyan]",
+                desc,
+                f"[{status_style}]{status}[/{status_style}]"
+            )
         
-        current_info = ""
-        if self.current_playlist:
-            current_info = f" | Current: {self.current_playlist.length():,} channels"
-        if self.loaded_playlists:
-            current_info += f" | Loaded: {len(self.loaded_playlists)} playlists"
+        menu_panel = Panel(menu_table, title="🎯 Main Menu", border_style="bright_blue")
+        self.console.print(menu_panel)
         
-        self.console.print(Panel(menu_table, 
-                               title=f"🎬 Enhanced IPTV Manager{current_info}", 
-                               title_align="left"))
+        # Quick tips
+        tips = [
+            "💡 Pro tip: Use option 7 for advanced group-based exporting",
+            "💡 Try loading from history (option 2) for quick access",
+            "💡 Merge playlists (option 9) to combine multiple sources"
+        ]
+        
+        tips_panel = Panel("\n".join(tips), title="💡 Quick Tips", border_style="yellow")
+        self.console.print(tips_panel)
         self.console.print()
     
     def _display_enhanced_simple_menu(self):
         """Display enhanced simple text menu."""
-        print(f"{Fore.CYAN}{Style.BRIGHT}🎬 Enhanced IPTV Manager{Style.RESET_ALL}")
-        if self.current_playlist:
-            print(f"{Fore.DIM}Current: {self.current_playlist.length():,} channels{Style.RESET_ALL}")
-        if self.loaded_playlists:
-            print(f"{Fore.DIM}Loaded: {len(self.loaded_playlists)} playlists{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}{Style.BRIGHT}🎬 ENHANCED IPTV PLAYLIST MANAGER{Style.RESET_ALL}")
         print()
-        print(f"{Fore.CYAN}1.{Style.RESET_ALL} 📥 Load Single Playlist")
-        print(f"{Fore.CYAN}2.{Style.RESET_ALL} 📜 Load from History")
-        print(f"{Fore.CYAN}3.{Style.RESET_ALL} 📚 Load Multiple Playlists")
-        print(f"{Fore.CYAN}4.{Style.RESET_ALL} 📊 Playlist Overview")
-        print(f"{Fore.CYAN}5.{Style.RESET_ALL} 📁 Group Analysis")
-        print(f"{Fore.CYAN}6.{Style.RESET_ALL} 🏷️ TVG Tag Analysis")
-        print(f"{Fore.CYAN}7.{Style.RESET_ALL} 💾 Export with Group Filter")
-        print(f"{Fore.CYAN}8.{Style.RESET_ALL} 🔀 Manage Playlists")
-        print(f"{Fore.CYAN}9.{Style.RESET_ALL} 🔄 Merge Playlists")
-        print(f"{Fore.CYAN}10.{Style.RESET_ALL} 🎭 Series Detection")
-        print(f"{Fore.CYAN}11.{Style.RESET_ALL} 🔍 Search Channels")
-        print(f"{Fore.CYAN}12.{Style.RESET_ALL} ❓ Help")
-        print(f"{Fore.CYAN}q.{Style.RESET_ALL} 🚪 Quit")
+        
+        # Status display
+        if self.current_playlist:
+            print(f"{Fore.GREEN}✓ Current Playlist: {self.current_playlist.length():,} channels{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}⚠ No playlist loaded{Style.RESET_ALL}")
+        
+        if self.loaded_playlists:
+            print(f"{Fore.BLUE}📚 Loaded: {len(self.loaded_playlists)} playlists{Style.RESET_ALL}")
+        
+        if self.url_history:
+            success_count = sum(1 for entry in self.url_history if entry.get('success', False))
+            print(f"{Fore.CYAN}📜 History: {success_count}/{len(self.url_history)} successful{Style.RESET_ALL}")
+        
+        print()
+        print(f"{Fore.CYAN}{Style.BRIGHT}🎯 Main Menu:{Style.RESET_ALL}")
+        print()
+        
+        menu_items = [
+            ("1", "📥 Load Single Playlist"),
+            ("2", "📜 Load from History"),
+            ("3", "📚 Load Multiple URLs"),
+            ("4", "📊 Playlist Overview"),
+            ("5", "📁 Group Analysis"),
+            ("6", "🏷️ TVG Tag Analysis"),
+            ("7", "💾 Smart Export"),
+            ("8", "🔀 Manage Playlists"),
+            ("9", "🔄 Merge Playlists"),
+            ("10", "🎭 Series Detection"),
+            ("11", "🔍 Search Channels"),
+            ("12", "❓ Help & Guide"),
+            ("q", "🚪 Exit Manager")
+        ]
+        
+        for key, desc in menu_items:
+            status = ""
+            if key in ['4','5','6','7','10','11'] and not self.current_playlist:
+                status = f"{Fore.RED} [needs playlist]{Style.RESET_ALL}"
+            elif key == '9' and len(self.loaded_playlists) < 2:
+                status = f"{Fore.RED} [need 2+ playlists]{Style.RESET_ALL}"
+            
+            print(f"{Fore.CYAN}{key}.{Style.RESET_ALL} {desc}{status}")
+        
+        print()
+        print(f"{Fore.YELLOW}💡 Pro tip: Use option 7 for advanced group-based exporting{Style.RESET_ALL}")
         print()
     
     def _show_enhanced_help(self):
         """Display enhanced help information."""
         if RICH_AVAILABLE:
             help_text = """
-[b]Enhanced IPTV Playlist Manager - Help[/b]
+[b]🎯 Enhanced IPTV Playlist Manager - Complete Guide[/b]
 
-[cyan]New Features:[/cyan]
-• [bold]URL History[/bold]: Load previously used URLs with success/failure status
-• [bold]Multiple Playlist Support[/bold]: Load and manage multiple playlists simultaneously  
-• [bold]TVG Tag Analysis[/bold]: Comprehensive analysis of TVG tag usage and statistics
-• [bold]Group Filtered Export[/bold]: Export only specific groups or exclude groups
-• [bold]Playlist Management[/bold]: Switch between, remove, or merge loaded playlists
+[bold cyan]🚀 Core Features:[/bold cyan]
+• [green]Smart Loading[/green]: Load from URLs, history, or multiple sources
+• [green]Advanced Analysis[/green]: Group statistics, TVG tag analysis, series detection
+• [green]Smart Exporting[/green]: Filter by groups with multi-select interface
+• [green]Playlist Management[/green]: Merge, switch between, and manage multiple playlists
 
-[cyan]Sample Workflows:[/cyan]
-1. Load multiple entertainment playlists from history
-2. Analyze TVG tag completeness across playlists
-3. Merge sports channels from different sources
-4. Export only "News" and "Sports" groups to a new playlist
+[bold cyan]💾 Export Features (Option 7):[/bold cyan]
+• [yellow]Multi-Column Group Display[/yellow]: View all groups in organized columns
+• [yellow]Flexible Selection[/yellow]: Use numbers, ranges (1-5), or toggle existing selections
+• [yellow]Smart Filtering[/yellow]: Include or exclude selected groups
+• [yellow]Export Summary[/yellow]: See exactly what will be exported before saving
 
-[i]Sample IPTV playlist URLs:[/i]
+[bold cyan]🎮 Quick Start:[/bold cyan]
+1. Load a playlist (option 1 or 2)
+2. Analyze it (options 4-6) 
+3. Export filtered content (option 7)
+4. Manage multiple sources (options 8-9)
+
+[bold cyan]🔗 Sample URLs:[/bold cyan]
 • https://iptv-org.github.io/iptv/categories/entertainment.m3u
 • https://iptv-org.github.io/iptv/categories/sports.m3u
 • https://iptv-org.github.io/iptv/categories/news.m3u
+
+[bold yellow]💡 Pro Tip:[/bold yellow] Use range selection (e.g., "1-5,10,15-20") in group export for quick bulk operations!
             """
-            self.console.print(Panel(help_text, title="❓ Enhanced Help", title_align="left"))
+            self.console.print(Panel(help_text, title="❓ Complete Help Guide", title_align="left", border_style="green"))
         else:
-            print(f"{Fore.CYAN}{Style.BRIGHT}❓ Enhanced Help:{Style.RESET_ALL}")
-            print("New Features:")
-            print("• URL History: Load previous URLs with status tracking")
-            print("• Multiple Playlist Support: Manage multiple playlists")
-            print("• TVG Tag Analysis: See tag usage statistics")
-            print("• Group Filtered Export: Export specific groups only")
-            print("• Playlist Management: Merge and manage playlists")
+            print(f"{Fore.CYAN}{Style.BRIGHT}🎯 Enhanced IPTV Manager - Complete Guide{Style.RESET_ALL}")
             print()
-            print(f"{Fore.YELLOW}Sample URLs:{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}🚀 Core Features:{Style.RESET_ALL}")
+            print("• Smart Loading: Load from URLs, history, or multiple sources")
+            print("• Advanced Analysis: Group stats, TVG tags, series detection")
+            print("• Smart Exporting: Filter by groups with multi-select")
+            print("• Playlist Management: Merge and manage multiple playlists")
+            print()
+            print(f"{Fore.YELLOW}💾 Export Features (Option 7):{Style.RESET_ALL}")
+            print("• Multi-Column Group Display: Organized group viewing")
+            print("• Flexible Selection: Use numbers, ranges (1-5), or toggle")
+            print("• Smart Filtering: Include or exclude selected groups")
+            print("• Export Summary: Preview before saving")
+            print()
+            print(f"{Fore.CYAN}🎮 Quick Start:{Style.RESET_ALL}")
+            print("1. Load a playlist (option 1 or 2)")
+            print("2. Analyze it (options 4-6)")
+            print("3. Export filtered content (option 7)")
+            print("4. Manage multiple sources (options 8-9)")
+            print()
+            print(f"{Fore.BLUE}🔗 Sample URLs:{Style.RESET_ALL}")
             print("https://iptv-org.github.io/iptv/categories/entertainment.m3u")
             print("https://iptv-org.github.io/iptv/categories/sports.m3u")
+            print("https://iptv-org.github.io/iptv/categories/news.m3u")
+            print()
+            print(f"{Fore.YELLOW}💡 Pro Tip: Use range selection (e.g., '1-5,10,15-20') in group export!{Style.RESET_ALL}")
             print()
     
     def _print_success(self, message: str):
         """Print success message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[green]✓ {message}[/green]")
+            self.console.print(f"[bold green]✅ {message}[/bold green]")
         else:
-            print(f"{Fore.GREEN}✓ {message}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}✅ {message}{Style.RESET_ALL}")
     
     def _print_error(self, message: str):
         """Print error message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[red]✗ {message}[/red]")
+            self.console.print(f"[bold red]❌ {message}[/bold red]")
         else:
-            print(f"{Fore.RED}✗ {message}{Style.RESET_ALL}")
+            print(f"{Fore.RED}❌ {message}{Style.RESET_ALL}")
     
     def _print_warning(self, message: str):
         """Print warning message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[yellow]⚠ {message}[/yellow]")
+            self.console.print(f"[bold yellow]⚠️  {message}[/bold yellow]")
         else:
-            print(f"{Fore.YELLOW}⚠ {message}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}⚠️  {message}{Style.RESET_ALL}")
     
     def _print_info(self, message: str):
         """Print info message."""
         if RICH_AVAILABLE:
-            self.console.print(f"[blue]ℹ {message}[/blue]")
+            self.console.print(f"[bold blue]ℹ️  {message}[/bold blue]")
         else:
-            print(f"{Fore.BLUE}ℹ {message}{Style.RESET_ALL}")
+            print(f"{Fore.BLUE}ℹ️  {message}{Style.RESET_ALL}")
 
 
 def check_dependencies():
@@ -1067,7 +1290,7 @@ def check_dependencies():
 def main():
     """Main entry point."""
     # Check dependencies
-    check_dependencies()  # Add this line
+    check_dependencies()
     
     # Create and run enhanced manager
     manager = EnhancedIPTVManager()
