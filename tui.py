@@ -1,4 +1,4 @@
-#!/usr/bin/env /home/frank/.pyenv/shims/python3
+#!/usr/bin/env python3
 """
 IPTV Playlist Manager - Advanced TUI (Terminal User Interface)
 
@@ -38,7 +38,7 @@ except ImportError:
     TEXTUAL_AVAILABLE = False
     
 # Remove pynput imports as Textual handles input
-KEYBOARD_AVAILABLE = False 
+KEYBOARD_AVAILABLE = True
 
 # IPyTV imports
 from ipytv import playlist
@@ -177,14 +177,17 @@ class IPTV_Backend:
         # Check prerequisites
         if op_type in ["overview", "groups", "tags", "export", "series", "search"] and not self.current_playlist:
             # In a Textual app, this should send a message to the App, not call _show_message directly
-            print("Action blocked: Please load a playlist first!")
+            self._show_message("Action blocked: Please load a playlist first!", "error")
             return
         elif op_type == "merge" and len(self.loaded_playlists) < 2:
-            print("Action blocked: Need at least 2 playlists to merge!")
+            self._show_message("Action blocked: Need at least 2 playlists to merge!", "error")
             return
         elif op_type == "history" and not self.url_history:
-            print("Action blocked: No URL history available!")
+            self._show_message("Action blocked: No URL history available!", "error")
             return
+        elif op_type == "exit":
+             # Textual handles the clean exit, just a placeholder
+             return
             
         # Execute handler (these handlers still rely on rich.prompt/console for user interaction)
         handler()
@@ -192,49 +195,45 @@ class IPTV_Backend:
     def _load_playlist_tui(self):
         """TUI for loading playlists."""
         # This implementation remains blocking, which is a future Textual refactor target.
-        self.console.clear()
-        
-        url_panel = Panel(
-            "Enter playlist URL below:\n\n"
-            "[dim]Examples:[/dim]\n"
-            "• https://iptv-org.github.io/iptv/categories/entertainment.m3u\n"
-            "• https://iptv-org.github.io/iptv/categories/sports.m3u\n"
-            "• https://iptv-org.github.io/iptv/categories/news.m3u",
-            title="📥 Load Playlist",
-            border_style="green"
-        )
-        self.console.print(url_panel)
-        
-        url = Prompt.ask("\n[cyan]URL[/cyan]")
-        if not url:
-            return
+        if self.console:
+            self.console.clear()
             
-        sanitize = Confirm.ask("Sanitize playlist?", default=True)
-        
-        with self._create_progress() as progress:
-            if self.load_playlist_from_url(url, sanitize):
-                self._show_message(f"✅ Loaded {self.current_playlist.length():,} channels!", "success")
-            else:
-                self._show_message("❌ Failed to load playlist", "error")
+            url_panel = Panel(
+                "Enter playlist URL below:\n\n"
+                "[dim]Examples:[/dim]\n"
+                "• https://iptv-org.github.io/iptv/categories/entertainment.m3u\n"
+                "• https://iptv-org.github.io/iptv/categories/sports.m3u\n"
+                "• https://iptv-org.github.io/iptv/categories/news.m3u",
+                title="📥 Load Playlist",
+                border_style="green"
+            )
+            self.console.print(url_panel)
+            
+            url = Prompt.ask("\n[cyan]URL[/cyan]")
+            if not url:
+                return
+                
+            sanitize = Confirm.ask("Sanitize playlist?", default=True)
+            
+            with self._create_progress() as progress:
+                if self.load_playlist_from_url(url, sanitize):
+                    self._show_message(f"✅ Loaded {self.current_playlist.length():,} channels!", "success")
+                else:
+                    self._show_message("❌ Failed to load playlist", "error")
 
     def _load_from_history_tui(self):
-        # ... keep original implementation ...
         self._show_message("Loading from history - functionality retained (blocking)", "info")
 
     def _show_overview_tui(self):
-        # ... keep original implementation ...
         self._show_message("Playlist Overview - functionality retained (blocking)", "info")
 
     def _show_groups_tui(self):
-        # ... keep original implementation ...
         self._show_message("Group Analysis - functionality retained (blocking)", "info")
 
     def _export_tui(self):
-        # ... keep original implementation ...
         self._show_message("Smart Export - functionality retained (blocking)", "info")
         
     def _perform_export(self, groups: Dict[str, List[int]]):
-        # ... keep original implementation ...
         self._show_message("Exporting - functionality retained (blocking)", "info")
 
     def _show_message(self, message: str, msg_type: str = "info"):
@@ -247,8 +246,11 @@ class IPTV_Backend:
             "info": "blue"
         }
         
-        self.console.print(f"\n[{styles.get(msg_type, 'blue')}]{message}[/{styles.get(msg_type, 'blue')}]")
-        Prompt.ask("[dim]Press Enter to continue[/dim]")
+        if self.console:
+            self.console.print(f"\n[{styles.get(msg_type, 'blue')}]{message}[/{styles.get(msg_type, 'blue')}]")
+            Prompt.ask("[dim]Press Enter to continue[/dim]")
+        else:
+            print(f"{message}")
 
     # Placeholder methods for other TUI functions
     def _load_multiple_tui(self):
@@ -277,7 +279,8 @@ class IPTV_Backend:
 
     def _loading_screen(self):
         """Show loading screen."""
-        self.console.print("[yellow]Loading...[/yellow]")
+        if self.console:
+            self.console.print("[yellow]Loading...[/yellow]")
 
     def _exit_tui(self):
         """Clean exit from TUI."""
@@ -345,6 +348,7 @@ class MainMenu(Static):
         # Use a Rich console capture to turn the Rich Panel/Table into a string for Textual's Static widget
         menu_panel = Panel(menu_table, border_style="cyan")
         
+        # Use the app's console or a dedicated console based on current size
         console = Console(markup=True, width=self.app.size.width)
         with console.capture() as capture:
             console.print(menu_panel)
@@ -356,14 +360,18 @@ class IPTVTUI(App):
     """The main Textual application for IPTV management."""
     
     # Textual App Configuration
-    #CSS_PATH = "tui.css" # You can optionally create this file for styling
+    
+    # --- START OF CHANGE ---
     BINDINGS = [
         ("up", "cursor_up", "Move Up"),
         ("down", "cursor_down", "Move Down"),
+        # Map Left/Right to Up/Down for flexible navigation
+        ("left", "cursor_up", "Move Up (Alt)"),
+        ("right", "cursor_down", "Move Down (Alt)"),
         ("enter", "select_option", "Select"),
         ("q", "quit", "Quit")
-        # Add quick jump bindings (1-9) here if desired
     ]
+    # --- END OF CHANGE ---
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -401,7 +409,9 @@ class IPTVTUI(App):
         
         # Footer with help
         help_text = Text()
-        help_text.append("↑↓: Navigate • ENTER: Select • q: Quit", style="dim")
+        # --- UPDATE FOOTER TEXT TO REFLECT NEW BINDINGS ---
+        help_text.append("↑↓/←→: Navigate • ENTER: Select • q: Quit", style="dim")
+        # --- END OF UPDATE ---
         yield Static(
             Panel(Align.center(help_text), border_style="dim"),
             id="app_footer_help"
@@ -451,12 +461,12 @@ def main():
     # Create and run TUI manager
     app = IPTVTUI()
     
-    # Handle command line arguments (Textual App doesn't handle command line args 
-    # directly on run, but we can access them here before running the App)
+    # Handle command line arguments
     if len(sys.argv) > 1:
         url = sys.argv[1]
         sanitize = len(sys.argv) <= 2 or sys.argv[2].lower() != '--no-sanitize'
         # Load playlist before running the app
+        # Note: Since this is blocking, it should be done *before* the app runs.
         app.manager.load_playlist_from_url(url, sanitize)
     
     # Start TUI
